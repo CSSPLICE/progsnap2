@@ -1,8 +1,75 @@
 import zipfile
 import argparse
+import os
+import sys
+import csv
+from pprint import pprint
 
 
-def load_vpl_submissions(submissions_filename):
+class Progsnap2:
+    '''
+    A representation of the Progsnap2 data file being generated.
+    '''
+    VERSION = 3
+    def __init__(self, csv_writer_options=None):
+        if csv_writer_options is None:
+            csv_writer_options = {'delimiter': ',', 'quotechar': '"',
+                                  'quoting': csv.QUOTE_MINIMAL}
+        self.csv_writer_options = csv_writer_options
+        # Actual data contents
+        self.main_table_header = ['EventType', 'EventID', 'Order', 'SubjectID',
+                                  'ToolInstances', 'CodeStateID']
+        self.main_table = []
+        # Keep track of IDs
+        self.code_state_id = 0
+        self.event_id = 0
+    
+    def export(self, directory):
+        self.export_metadata(directory)
+        self.export_main_table(directory)
+    
+    def export_metadata(self, directory):
+        metadata_filename = os.path.join(directory, "DatasetMetadata.csv")
+        with open(metadata_filename, 'w') as metadata_file:
+            metadata_writer = csv.writer(metadata_file, 
+                                         **self.csv_writer_options)
+            metadata_writer.writerow(['Property', 'Value'])
+            metadata_writer.writerow(['Version', self.VERSION])
+            metadata_writer.writerow(['AreEventsOrdered', 'true'])
+            metadata_writer.writerow(['IsEventOrderingConsistent', 'true'])
+            metadata_writer.writerow(['CodeStateRepresentation', 'Table'])
+    
+    def export_main_table(self, directory):
+        main_table_filename = os.path.join(directory, "MainTable.csv")
+        with open(main_table_filename, 'w', newline='') as main_table_file:
+            main_table_writer = csv.writer(main_table_file, 
+                                           **self.csv_writer_options)
+            main_table_writer.writerow(self.main_table_header)
+            for row in self.main_table:
+                main_table_writer.writerow(row)
+    
+    def log_event(self, when, subject_id, event_type):
+        self.event_id += 1
+        self.main_table.append([
+            event_type, self.event_id, when, 
+            subject_id, 'VPL', self.code_state_id
+        ])
+    
+    def log_code(self, when, subject_id, code):
+        self.event_id += 1
+        self.code_state_id += 1
+
+def add_path(structure, path):
+    components = path.split("/")
+    while len(components) > 1:
+        current = components.pop(0)
+        if current not in structure:
+            structure[current] = {}
+        structure = structure[current]
+    if components[0]:
+        structure[components[0]] = path
+
+def load_vpl_submissions(progsnap, submissions_filename):
     '''
     Arguments:
         submissions_filename (str): The file path to the zip file.
@@ -10,24 +77,34 @@ def load_vpl_submissions(submissions_filename):
     if not zipfile.is_zipfile(submissions_filename):
         raise Exception("I expected a Zipfile for "+str(submissions_filename))
     zipped = zipfile.ZipFile(submissions_filename)
-    students = set()
-    for name in sorted(zipped.namelist(), lambda r: -r):
-        print(name)
-        r_dir = name.split('/')
-        student = r_dir[0]
-        students.add(student)
+    filesystem = {}
+    for name in zipped.namelist():
+        add_path(filesystem, name)
+    for student, student_directory in filesystem.items():
+        for timestamp, submission_directory in student_directory.items():
+            if timestamp.endswith('.ceg'):
+                # Same Files
+                progsnap.log_event(timestamp, student, 'compilation')
+                'compilation.txt'
+                'execution.txt' # might be missing
+                'grade.txt'
+                'gradecomments.txt' # might be missing
+            else:
+                # Student files
+                pass
+    #pprint(filesystem)
 
-def load_vpl_events(events_filename):
+def load_vpl_events(progsnap, events_filename):
     pass
 
-def load_vpl_logs(events_filename, submissions_filename):
+def load_vpl_logs(progsnap, events_filename, submissions_filename):
     '''
     Arguments:
         events_filename (str): The file path to the CSV file
         submissions_filename (str): The file path to the zip file.
     '''
-    submissions = load_vpl_submissions(submissions_filename)
-    events = load_vpl_events(events_filename)
+    submissions = load_vpl_submissions(progsnap, submissions_filename)
+    events = load_vpl_events(progsnap, events_filename)
     #return list(students)
 
 if __name__ == "__main__":
@@ -45,5 +122,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     
-    data = load_vpl_logs(args.events, args.submissions)
+    progsnap = Progsnap2()
+    data = load_vpl_logs(progsnap, args.events, args.submissions)
+    progsnap.export('exported/')
     print(data)
