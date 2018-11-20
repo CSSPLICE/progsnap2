@@ -11,7 +11,7 @@ def load_vpl_submissions(submissions_filename):
         raise Exception("I expected a Zipfile for "+str(submissions_filename))
     zipped = zipfile.ZipFile(submissions_filename)
     students = set()
-    for name in sorted(zipped.namelist()):
+    for name in sorted(zipped.namelist(), lambda r: -r):
         print(name)
         r_dir = name.split('/')
         student = r_dir[0]
