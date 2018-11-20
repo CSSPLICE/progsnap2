@@ -11,11 +11,12 @@ def load_vpl_logs(filename):
         raise Exception("I expected a Zipfile for "+str(filename))
     zipped = zipfile.ZipFile(filename)
     students = set()
-    for name in zipped.namelist():
+    for name in sorted(zipped.namelist()):
+        print(name)
         r_dir = name.split('/')
         student = r_dir[0]
         students.add(student)
-    return list(students)
+    #return list(students)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Convert event logs from VPL into the progsnap2 format.')
