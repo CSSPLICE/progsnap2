@@ -5,10 +5,45 @@ import sys
 import csv
 from pprint import pprint
 
+VPL_INSTANCE = 'VPL 3.3.1'
 
-class Progsnap2:
+class Event:
     '''
-    A representation of the Progsnap2 data file being generated.
+    Attributes:
+        event_type (str): Taken from parameter
+        event_id (int): Assigned after all events are sorted.
+        order (int|str): Taken from parameter
+        subject_id (str): Taken from parameter
+        tool_instances (str): Taken from global constant
+        code_state_id (int): Assigned after all events are sorted.
+    
+    '''
+    def __init__(self, order, subject_id, event_type, **kwargs):
+        self.order = order
+        self.subject_id = subject_id
+        self.event_type = event_type
+        self._optional_parameters = kwargs
+    
+    def finalize(self, default_parameter_values):
+        '''
+        Arguments:
+            default_parameter_values (dict of str: Any): A dictionary of the
+                                                         default values for
+                                                         all of the optional
+                                                         parameters.
+        '''
+        # Avoid mutating original
+        parameter_values = dict(default_parameter_values)
+        parameter_values.update(self._optional_parameters)
+        sorted_parameters = sorted(parameter_values.items())
+        ordered_values = [value for parameter, value in sorted_parameters]
+        return list(self.event_type, self.event_id, self.order,
+                    self.subject_id, self.tool_instances, self.code_state_id,
+                    *ordered_values)
+
+class ProgSnap2:
+    '''
+    A representation of the ProgSnap2 data file being generated.
     '''
     VERSION = 3
     def __init__(self, csv_writer_options=None):
@@ -48,12 +83,17 @@ class Progsnap2:
             for row in self.main_table:
                 main_table_writer.writerow(row)
     
+    def finalize_table(self):
+        # Combine the disparate lists
+        # Sort the timestamps|users|events
+        pass
+    
     def log_event(self, when, subject_id, event_type):
         self.event_id += 1
-        self.main_table.append([
+        self.main_table.append({
             event_type, self.event_id, when, 
             subject_id, 'VPL', self.code_state_id
-        ])
+        })
     
     def log_code(self, when, subject_id, code):
         self.event_id += 1
@@ -84,7 +124,7 @@ def load_vpl_submissions(progsnap, submissions_filename):
         for timestamp, submission_directory in student_directory.items():
             if timestamp.endswith('.ceg'):
                 # Same Files
-                progsnap.log_event(timestamp, student, 'compilation')
+                progsnap.log_event(timestamp, student, 'Compile')
                 'compilation.txt'
                 'execution.txt' # might be missing
                 'grade.txt'
@@ -122,7 +162,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     
-    progsnap = Progsnap2()
+    progsnap = ProgSnap2()
     data = load_vpl_logs(progsnap, args.events, args.submissions)
     progsnap.export('exported/')
     print(data)
