@@ -7,6 +7,16 @@ from pprint import pprint
 
 VPL_INSTANCE = 'VPL 3.3.1'
 
+# Some events trigger at distinct timestamps.
+ARBITRARY_EVENT_ORDER = [
+    'Submit',
+    'Compile',
+    'Compile.Error',
+    'Program.Run',
+    'Program.Test',
+    'Feedback.Grade',
+]
+
 class Event:
     '''
     Attributes:
@@ -18,13 +28,14 @@ class Event:
         code_state_id (int): Assigned after all events are sorted.
     
     '''
-    def __init__(self, order, subject_id, event_type, **kwargs):
-        self.order = order
+    def __init__(self, server_timestamp, subject_id, event_type, **kwargs):
+        self.server_timestamp = server_timestamp
         self.subject_id = subject_id
         self.event_type = event_type
         self._optional_parameters = kwargs
         self.event_id = None
         self.code_state_id = None
+        self.order = None
     
     def set_ordering(self, event_id, code_state_id=None):
         '''
@@ -34,6 +45,7 @@ class Event:
         been processed and ordered appropriately.
         '''
         self.event_id = event_id
+        self.order = event_id
         if code_state_id is not None:
             self.code_state_id = code_state_id
     
@@ -52,6 +64,7 @@ class Event:
         ordered_values = [value for parameter, value in sorted_parameters]
         return list(self.event_type, self.event_id, self.order,
                     self.subject_id, self.tool_instances, self.code_state_id,
+                    self.server_timestamp,
                     *ordered_values)
     
     @staticmethod
@@ -64,6 +77,10 @@ class Event:
         for event in events:
             optional_parameters.update(event._optional_parameters)
         return optional_parameters
+    
+    @staticmethod
+    def get_order(event):
+        return self.server_timestamp
 
 class ProgSnap2:
     '''
@@ -86,7 +103,8 @@ class ProgSnap2:
         self.csv_writer_options = csv_writer_options
         # Actual data contents
         self.main_table_header = ['EventType', 'EventID', 'Order', 'SubjectID',
-                                  'ToolInstances', 'CodeStateID']
+                                  'ToolInstances', 'CodeStateID',
+                                  'ServerTimestamp']
         self.main_table = []
         
         self.code_files = {tuple(): 0}
@@ -124,9 +142,10 @@ class ProgSnap2:
         with open(main_table_filename, 'w', newline='') as main_table_file:
             main_table_writer = csv.writer(main_table_file, 
                                            **self.csv_writer_options)
-            main_table_writer.writerow(self.main_table_header)
             self.finalize_table()
             optionals = Event.distill_parameters(self.main_table)
+            header = self.main_table_header + list(optionals.keys())
+            main_table_writer.writerow(header)
             for row in self.main_table:
                 finalized_row = row.finalize(optionals)
                 main_table_writer.writerow(finalized_row)
@@ -136,7 +155,7 @@ class ProgSnap2:
         Sort the timestamps|users|events.
         Add in event_id (and code_state_id if it's missing)
         '''
-        self.main_table.sort(key= lambda event: event.order)
+        self.main_table.sort(key= Event.get_order)
         event_id = 0
         code_state_id = 0
         subject_code_states = {}
@@ -148,14 +167,34 @@ class ProgSnap2:
                 event.set_ordering(event_id)
             event_id += 1
     
-    def log_event(self, order, subject_id, event_type):
-        new_event = Event(order, subject_id, event_type)
+    def log_event(self, when, subject_id, event_type):
+        new_event = Event(when, subject_id, event_type)
         self.main_table.append(new_event)
+        return new_event
     
-    def log_code(self, when, subject_id, code):
-        new_event = Event(order, subject_id, event_type)
-        self.main_table.append(new_event)
+    def log_submit(self, when, subject_id, code):
+        new_event = log_event(when, subject_id, 'Submit')
         new_event.code_state_id = self.hash_code_directory(code)
+    
+    def log_submissions(self, student, timestamp, submission_directory):
+        if 'execution.txt' not in submission_directory:
+            if 'compilation.txt' in submission_directory:
+                compile_message_data = load_file_contents(submission_directory['compilation.txt'])
+            else:
+                compile_message_data = ""
+            self.log_event(timestamp, student, 'Compile.Error',
+                               CompileMessageType='Error',
+                               CompileMessageData=compile_message_data)
+        else:
+            intervention_message = load_file_contents(submission_directory['execution.txt'])
+            self.log_event(timestamp, student, 'Run.Program',
+                               InterventionType='Feedback',
+                               InterventionMessage=intervention_message)
+        if 'grade.txt' in submission_directory:
+            grade = float(load_file_contents(submission_directory['grade.txt']))
+            self.log_event(timestamp, student, 'Feedback.Grade',
+                               InterventionType='Grade',
+                               InterventionMessage=grade)
     
     def hash_code_directory(self, code):
         '''
@@ -183,6 +222,10 @@ def add_path(structure, path):
         structure = structure[current]
     if components[0]:
         structure[components[0]] = path
+        
+def load_file_contents(path):
+    with open(path) as a_file:
+        return a_file.read()
 
 def load_vpl_submissions(progsnap, submissions_filename):
     '''
@@ -199,14 +242,10 @@ def load_vpl_submissions(progsnap, submissions_filename):
         for timestamp, submission_directory in student_directory.items():
             if timestamp.endswith('.ceg'):
                 # Same Files
-                progsnap.log_event(timestamp, student, 'Compile')
-                'compilation.txt'
-                'execution.txt' # might be missing
-                'grade.txt'
-                'gradecomments.txt' # might be missing
+                progsnap.log_submissions(student, timestamp, submission_directory)
             else:
+                progsnap.log_event(timestamp, student, 'Submit')
                 # Student files
-                pass
     #pprint(filesystem)
 
 def load_vpl_events(progsnap, events_filename):
