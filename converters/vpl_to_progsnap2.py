@@ -23,6 +23,19 @@ class Event:
         self.subject_id = subject_id
         self.event_type = event_type
         self._optional_parameters = kwargs
+        self.event_id = None
+        self.code_state_id = None
+    
+    def set_ordering(self, event_id, code_state_id=None):
+        '''
+        Ironically, this does not set the `order` attribute, which is a
+        more or less absolute representation of time. Instead this method is
+        meant to update the relative attributes after all the events have
+        been processed and ordered appropriately.
+        '''
+        self.event_id = event_id
+        if code_state_id is not None:
+            self.code_state_id = code_state_id
     
     def finalize(self, default_parameter_values):
         '''
@@ -40,10 +53,30 @@ class Event:
         return list(self.event_type, self.event_id, self.order,
                     self.subject_id, self.tool_instances, self.code_state_id,
                     *ordered_values)
+    
+    @staticmethod
+    def distill_parameters(events):
+        '''
+        Given a set of events, finds all of the optional parameters by
+        unioning the parameters of all the events.
+        '''
+        optional_parameters = set()
+        for event in events:
+            optional_parameters.update(event._optional_parameters)
+        return optional_parameters
 
 class ProgSnap2:
     '''
     A representation of the ProgSnap2 data file being generated.
+    
+    Directory is a 2N-tuple of N files, with each file having a name and
+        contents paired together. This allows us to hash directories of
+        files and perform deduplication.
+    
+    Attributes:
+        code_files (dict of Directory: str): The dictionary mapping the
+                                             filename/contents to the code
+                                             instance IDs.
     '''
     VERSION = 3
     def __init__(self, csv_writer_options=None):
@@ -55,15 +88,24 @@ class ProgSnap2:
         self.main_table_header = ['EventType', 'EventID', 'Order', 'SubjectID',
                                   'ToolInstances', 'CodeStateID']
         self.main_table = []
-        # Keep track of IDs
-        self.code_state_id = 0
-        self.event_id = 0
+        
+        self.code_files = {tuple(): 0}
+        self.CODE_ID = 1
     
     def export(self, directory):
+        '''
+        Create a concrete, on-disk representation of this event database.
+        
+        Arguments:
+            directory (str): The location to store the generated files.
+        '''
         self.export_metadata(directory)
         self.export_main_table(directory)
     
     def export_metadata(self, directory):
+        '''
+        Create the metadata table, which is more or less a constant file.
+        '''
         metadata_filename = os.path.join(directory, "DatasetMetadata.csv")
         with open(metadata_filename, 'w') as metadata_file:
             metadata_writer = csv.writer(metadata_file, 
@@ -72,32 +114,65 @@ class ProgSnap2:
             metadata_writer.writerow(['Version', self.VERSION])
             metadata_writer.writerow(['AreEventsOrdered', 'true'])
             metadata_writer.writerow(['IsEventOrderingConsistent', 'true'])
-            metadata_writer.writerow(['CodeStateRepresentation', 'Table'])
+            metadata_writer.writerow(['CodeStateRepresentation', 'Directory'])
     
     def export_main_table(self, directory):
+        '''
+        Create the main table file.
+        '''
         main_table_filename = os.path.join(directory, "MainTable.csv")
         with open(main_table_filename, 'w', newline='') as main_table_file:
             main_table_writer = csv.writer(main_table_file, 
                                            **self.csv_writer_options)
             main_table_writer.writerow(self.main_table_header)
+            self.finalize_table()
+            optionals = Event.distill_parameters(self.main_table)
             for row in self.main_table:
-                main_table_writer.writerow(row)
+                finalized_row = row.finalize(optionals)
+                main_table_writer.writerow(finalized_row)
     
     def finalize_table(self):
-        # Combine the disparate lists
-        # Sort the timestamps|users|events
-        pass
+        '''
+        Sort the timestamps|users|events.
+        Add in event_id (and code_state_id if it's missing)
+        '''
+        self.main_table.sort(key= lambda event: event.order)
+        event_id = 0
+        code_state_id = 0
+        subject_code_states = {}
+        for event in self.main_table:
+            current_code_state = subject_code_states.get(event.subject, 0)
+            if event.code_state_id is None:
+                event.set_ordering(event_id, current_code_state)
+            else:
+                event.set_ordering(event_id)
+            event_id += 1
     
-    def log_event(self, when, subject_id, event_type):
-        self.event_id += 1
-        self.main_table.append({
-            event_type, self.event_id, when, 
-            subject_id, 'VPL', self.code_state_id
-        })
+    def log_event(self, order, subject_id, event_type):
+        new_event = Event(order, subject_id, event_type)
+        self.main_table.append(new_event)
     
     def log_code(self, when, subject_id, code):
-        self.event_id += 1
-        self.code_state_id += 1
+        new_event = Event(order, subject_id, event_type)
+        self.main_table.append(new_event)
+        new_event.code_state_id = self.hash_code_directory(code)
+    
+    def hash_code_directory(self, code):
+        '''
+        Currently hashing just based on order received - possibly need
+        something more sophisticated?
+        
+        Arguments:
+            code (tuple of tuple of str): A series of filename/contents paired
+                                          into a tuple of tuples, sorted by
+                                          filenames.
+        '''
+        if code in self.code_files:
+            code_state_id = self.code_files[code]
+        else:
+            code_state_id = self.CODE_ID
+            self.CODE_ID += 1
+        return code_state_id
 
 def add_path(structure, path):
     components = path.split("/")
