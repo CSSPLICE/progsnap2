@@ -195,8 +195,10 @@ class ProgSnap2:
             if event.code_state_id is None:
                 event.set_ordering(order, current_code_state)
             else:
+                current_code_state = event.code_state_id
                 event.set_ordering(order)
             order += 1
+            subject_code_states[event.subject_id] = current_code_state
     
     def log_event(self, when, subject_id, event_type, **kwargs):
         new_event = Event(when, subject_id, event_type, **kwargs)
@@ -281,7 +283,8 @@ def load_vpl_submissions(progsnap, submissions_filename):
     for name in zipped.namelist():
         add_path(filesystem, name)
     for student, student_directory in filesystem.items():
-        for timestamp, submission_directory in student_directory.items():
+        sorted_student_directory = sorted(student_directory.items())
+        for timestamp, submission_directory in sorted_student_directory:
             if timestamp.endswith('.ceg'):
                 continue
             submission = progsnap.log_submit(timestamp, student, submission_directory, zipped)
