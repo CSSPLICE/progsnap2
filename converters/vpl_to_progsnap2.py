@@ -1,3 +1,15 @@
+'''
+A command line tool for turning VPL logs into ProgSnap2 format
+
+Refer to:
+    Protocol Draft: https://docs.google.com/document/d/1bZPu8LIUPOfobWsCO_9ayi5LC9_1wa1YCAYgbKGAZfA/edit#
+    CodeState Representation: https://docs.google.com/document/d/1FZHBcHYAG9uC9tRdhyoPIsCrJZP_jUSNXTswDHCi-ys/edit#
+    
+TODO:
+    I could have done more to decouple the zipfile reading from the ProgSnap2
+    class, which would probably make this more reusable for others.
+'''
+
 import zipfile
 import argparse
 import os
@@ -40,11 +52,11 @@ class Event:
         tool_instances (str): Taken from global constant
         code_state_id (int): The current code state for this event.
         server_timestamp (str): Taken from parameter
-    
+        EVENT_ID (int): Unique, auto-incrementing ID for the events
     '''
     EVENT_ID = 0
     def __init__(self, server_timestamp, subject_id, event_type, **kwargs):
-        self.server_timestamp = vpl_timestamp_to_iso8601(server_timestamp)
+        self.server_timestamp = server_timestamp
         self.subject_id = subject_id
         self.event_type = event_type
         self._optional_parameters = kwargs
@@ -59,6 +71,10 @@ class Event:
         more or less absolute representation of time. Instead this method is
         meant to update the relative attributes after all the events have
         been processed and ordered appropriately.
+        
+        Arguments:
+            order (int): The new order for this event
+            code_state_id (int|None): The new code state for this event.
         '''
         self.order = order
         if code_state_id is not None:
@@ -66,11 +82,14 @@ class Event:
     
     def finalize(self, default_parameter_values):
         '''
+        Fill in any missing optional parameters for this row, sort the all
+        parameters into the right order.
+        
         Arguments:
-            default_parameter_values (dict of str: Any): A dictionary of the
-                                                         default values for
-                                                         all of the optional
-                                                         parameters.
+            default_parameter_values (dict[str: Any]): A dictionary of the
+                                                       default values for
+                                                       all of the optional
+                                                       parameters.
         '''
         # Avoid mutating original
         parameter_values = dict(default_parameter_values)
@@ -87,18 +106,47 @@ class Event:
         '''
         Given a set of events, finds all of the optional parameters by
         unioning the parameters of all the events.
+        
+        Arguments:
+            events (list[Event]): The events to distill all the parameters
+                                    from.
+        Returns:
+            dict[str:str]: The mapping of parameters to empty strings.
+                           TODO: The plan was to have default values, but
+                                 that seems unnecessary now. Maybe should
+                                 just be a set instead?
         '''
         optional_parameters = set()
         for event in events:
             optional_parameters.update(event._optional_parameters)
         return {p:"" for p in optional_parameters}
     
-    @staticmethod
-    def get_order(event):
-        return event.server_timestamp
+    def get_order(self):
+        '''
+        Create a value representing the absolute position of a given
+        event. Useful as a key function for a sorting.
+        
+        Returns:
+            str: The timestamp
+        '''
+        return self.server_timestamp
     
     @staticmethod
     def get_parameter_order(parameter):
+        '''
+        Identifies what order this parameter should go in. Useful as a key
+        function for sorting. It uses the ARBITRARY_COLUMN_ORDER, but if
+        the number isn't found, then the sorting will rely on
+        alphabetical ordering of the parameters.
+        
+        Arguments:
+            parameter (str): A column name for a ProgSnap file.
+        
+        Returns:
+            tuple[int,str]: A pair of the arbitrary column order and the
+                            parameter's value, allowing you to break ties with
+                            the latter.
+        '''
         if parameter in ARBITRARY_COLUMN_ORDER:
             return (ARBITRARY_COLUMN_ORDER.index(parameter), parameter)
         return (len(ARBITRARY_COLUMN_ORDER), parameter)
@@ -107,14 +155,21 @@ class ProgSnap2:
     '''
     A representation of the ProgSnap2 data file being generated.
     
-    Directory is a 2N-tuple of N files, with each file having a name and
-        contents paired together. This allows us to hash directories of
-        files and perform deduplication.
-    
-    Attributes:
-        code_files (dict of Directory: str): The dictionary mapping the
-                                             filename/contents to the code
-                                             instance IDs.
+    Directory is a tuple of N files, where each element of the tuple is a
+        tuple having a filename and contents paired together. This allows us
+        to hash directories of files and perform deduplication.
+        
+    Attributes
+        main_table (list[Event]): The current list of events.
+        main_table_header (list[str]): The default headers for the table.
+        csv_writer_options (dict[str:str]): Options to pass to the CSV
+                                            writer, to maintain some
+                                            flexibility for later.
+        code_files (dict[Directory: str]): The dictionary mapping the
+                                           filename/contents to the code
+                                           instance IDs.
+        CODE_ID (int): The auto-incrementing ID to apply to new codes.
+        VERSION (int): The current Progsnap Standard Version
     '''
     VERSION = 3
     def __init__(self, csv_writer_options=None):
@@ -143,6 +198,9 @@ class ProgSnap2:
     def export_metadata(self, directory):
         '''
         Create the metadata table, which is more or less a constant file.
+        
+        Arguments:
+            directory (str): The location to store the generated files.
         '''
         metadata_filename = os.path.join(directory, "DatasetMetadata.csv")
         with open(metadata_filename, 'w', newline='') as metadata_file:
@@ -157,6 +215,9 @@ class ProgSnap2:
     def export_main_table(self, directory):
         '''
         Create the main table file.
+        
+        Arguments:
+            directory (str): The location to store the generated files.
         '''
         main_table_filename = os.path.join(directory, "MainTable.csv")
         with open(main_table_filename, 'w', newline='') as main_table_file:
@@ -172,8 +233,17 @@ class ProgSnap2:
                 main_table_writer.writerow(finalized_row)
     
     def export_code_states(self, directory):
+        '''
+        Create the CodeStates directory and all of the code state files,
+        organized by their unique ID.
+        
+        Arguments:
+            directory (str): The location to store the generated files.
+        '''
         code_states_dir = os.path.join(directory, "CodeStates")
+        # Remove any existing CodeStates in this directory
         if os.path.exists(code_states_dir):
+            # Avoid bug on windows where a handle is sometimes kept
             dummy_dir = os.path.join(directory, DUMMY_CODE_STATES_DIR)
             os.rename(code_states_dir, dummy_dir)
             shutil.rmtree(dummy_dir)
@@ -189,10 +259,11 @@ class ProgSnap2:
     
     def finalize_table(self):
         '''
-        Sort the timestamps|users|events.
-        Add in event_id (and code_state_id if it's missing)
+        Sort the timestamps of the events.
+        Add in order (and code_state_id if it's missing)
         '''
         self.main_table.sort(key= Event.get_order)
+        # Fix order attribute, make sure code_state_id is correct
         order = 0
         code_state_id = 0
         subject_code_states = {}
@@ -207,11 +278,41 @@ class ProgSnap2:
             subject_code_states[event.subject_id] = current_code_state
     
     def log_event(self, when, subject_id, event_type, **kwargs):
+        '''
+        Add in a new event to the ProgSnap2 instance.
+        
+        Arguments:
+            when (str): the timestamp to use when ordering these events.
+                        Currently using the ServerTimestamp.
+            subject_id (str): Uniquely identifying user id.
+            event_id (str): An EventType, such as the ones documented for
+                            the standard.
+            kwargs (dict[str:Any]): Any optional columns for this row; the
+                                    keys must match to actual columns in
+                                    the progsnap standard (e.g., ParentEventID)
+        Returns:
+            Event: The newly created event
+        '''
         new_event = Event(when, subject_id, event_type, **kwargs)
         self.main_table.append(new_event)
         return new_event
     
     def log_submit(self, when, subject_id, submission_directory, zipped):
+        '''
+        Add in a Submit event, which has associated code in the zip file.
+        
+        Arguments:
+            when (str): the timestamp to use when ordering these events.
+                        Currently using the ServerTimestamp.
+            subject_id (str): Uniquely identifying user id.
+            submission_directory (dict[str:str]): A dictionary that maps
+                                                  local filenames to their
+                                                  absolute path in the zip
+                                                  file.
+            zipped (ZipFile): A zipfile that has the students' code in it.
+        Returns:
+            Event: The newly created event
+        '''
         new_event = self.log_event(when, subject_id, 'Submit')
         code = []
         for filepath, full in submission_directory.items():
@@ -221,31 +322,10 @@ class ProgSnap2:
         new_event.code_state_id = self.hash_code_directory(code)
         return new_event
     
-    def log_submissions(self, student, timestamp, ceg_directory, zipped, parent_event):
-        if 'execution.txt' not in ceg_directory:
-            if 'compilation.txt' in ceg_directory:
-                compile_message_data = load_file_contents(zipped, ceg_directory['compilation.txt'])
-            else:
-                compile_message_data = ""
-            self.log_event(timestamp, student, 'Compile.Error',
-                               CompileMessageType='Error',
-                               CompileMessageData=compile_message_data,
-                               ParentEventID=parent_event.event_id)
-        else:
-            intervention_message = load_file_contents(zipped, ceg_directory['execution.txt'])
-            self.log_event(timestamp, student, 'Run.Program',
-                               InterventionType='Feedback',
-                               InterventionMessage=intervention_message,
-                               ParentEventID=parent_event.event_id)
-        if 'grade.txt' in ceg_directory:
-            grade = load_file_contents(zipped, ceg_directory['grade.txt'])
-            self.log_event(timestamp, student, 'Feedback.Grade',
-                               InterventionType='Grade',
-                               InterventionMessage=grade,
-                               ParentEventID=parent_event.event_id)
-    
     def hash_code_directory(self, code):
         '''
+    
+
         Currently hashing just based on order received - possibly need
         something more sophisticated?
         
@@ -273,6 +353,10 @@ def vpl_timestamp_to_iso8601(timestamp):
     return date + "T" + time
 
 def add_path(structure, path):
+    '''
+    TODO: This shouldn't actually recurse into student code directories. Those
+    should be "flat".
+    '''
     components = path.split("/")
     while len(components) > 1:
         current = components.pop(0)
@@ -286,6 +370,29 @@ def load_file_contents(zipped, path):
     data_file = zipped.open(path, 'r')
     data_file  = io.TextIOWrapper(data_file, encoding=ENCODING)
     return data_file.read()
+
+def log_ceg(progsnap, student, timestamp, ceg_directory, zipped, parent_event):
+    if 'execution.txt' not in ceg_directory:
+        if 'compilation.txt' in ceg_directory:
+            compile_message_data = load_file_contents(zipped, ceg_directory['compilation.txt'])
+        else:
+            compile_message_data = ""
+        progsnap.log_event(timestamp, student, 'Compile.Error',
+                           CompileMessageType='Error',
+                           CompileMessageData=compile_message_data,
+                           ParentEventID=parent_event.event_id)
+    else:
+        intervention_message = load_file_contents(zipped, ceg_directory['execution.txt'])
+        progsnap.log_event(timestamp, student, 'Run.Program',
+                           InterventionType='Feedback',
+                           InterventionMessage=intervention_message,
+                           ParentEventID=parent_event.event_id)
+    if 'grade.txt' in ceg_directory:
+        grade = load_file_contents(zipped, ceg_directory['grade.txt'])
+        progsnap.log_event(timestamp, student, 'Feedback.Grade',
+                           InterventionType='Grade',
+                           InterventionMessage=grade,
+                           ParentEventID=parent_event.event_id)
 
 def load_vpl_submissions(progsnap, submissions_filename):
     '''
@@ -303,11 +410,13 @@ def load_vpl_submissions(progsnap, submissions_filename):
         for timestamp, submission_directory in sorted_student_directory:
             if timestamp.endswith('.ceg'):
                 continue
-            submission = progsnap.log_submit(timestamp, student, submission_directory, zipped)
+            submission = progsnap.log_submit(vpl_timestamp_to_iso8601(timestamp), 
+                                             student, submission_directory, zipped)
             ceg_path = timestamp+'.ceg'
             if ceg_path in student_directory:
                 ceg_directory = student_directory[ceg_path]
-                progsnap.log_submissions(student, timestamp, ceg_directory, zipped, submission)
+                log_ceg(progsnap, student, vpl_timestamp_to_iso8601(timestamp),
+                        ceg_directory, zipped, submission)
     #pprint(filesystem)
 
 def load_vpl_events(progsnap, events_filename):
@@ -321,7 +430,6 @@ def load_vpl_logs(progsnap, events_filename, submissions_filename):
     '''
     submissions = load_vpl_submissions(progsnap, submissions_filename)
     events = load_vpl_events(progsnap, events_filename)
-    #return list(students)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Convert event logs from VPL into the progsnap2 format.')
