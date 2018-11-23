@@ -318,21 +318,23 @@ class ProgSnap2:
         for filepath, full in submission_directory.items():
             contents = load_file_contents(zipped, full)
             code.append((filepath, contents))
-        code = tuple(code)
+        code = tuple(sorted(code))
         new_event.code_state_id = self.hash_code_directory(code)
         return new_event
     
     def hash_code_directory(self, code):
         '''
-    
-
-        Currently hashing just based on order received - possibly need
+        Take in a tuple of tuple of code files and hash them into unique IDs,
+        returning the ID of this particularly given code file.
+        Note: Currently hashing just based on order received - possibly need
         something more sophisticated?
         
         Arguments:
             code (tuple of tuple of str): A series of filename/contents paired
                                           into a tuple of tuples, sorted by
                                           filenames.
+        Returns:
+            int: A unique ID of the given code files.
         '''
         if code in self.code_files:
             code_state_id = self.code_files[code]
@@ -344,9 +346,15 @@ class ProgSnap2:
         
 def vpl_timestamp_to_iso8601(timestamp):
     '''
-    2018-10-31-12-02-25
-    ->
+    Converts VPL style timestamps into an ISO-8601 compatible timestamp.
+    
+    > vpl_timestamp_to_iso8601(2018-10-31-12-02-25)
     2018-10-31T12:02:25
+    
+    Arguments:
+        timestamp (str): A VPL-style timestamp
+    Returns:
+        str: The ISO-8601 timestamp.
     '''
     date = timestamp[:10]
     time = timestamp[-8:].replace("-", ":")
@@ -354,8 +362,20 @@ def vpl_timestamp_to_iso8601(timestamp):
 
 def add_path(structure, path):
     '''
-    TODO: This shouldn't actually recurse into student code directories. Those
-    should be "flat".
+    Given a path and a structure representing a filesystem, parses the path
+    to add the components in the appropriate place of the structure.
+    
+    Note: This modifies the given structure!
+    
+    TODO: This shouldn't actually dive into student code directories. Those
+    should be "flat". We should either limit the depth or just unroll the loop.
+    
+    Structure:
+        dict[str:Structure]: A folder with nesting
+        dict[str:str]: A terminal level mapping to an absolute path name.
+    
+    Arguments:
+        structure (Structure): The representation of the filesystem.
     '''
     components = path.split("/")
     while len(components) > 1:
@@ -367,11 +387,47 @@ def add_path(structure, path):
         structure[components[0]] = path
         
 def load_file_contents(zipped, path):
+    '''
+    Reads the contents of the zipfile, respecting Unicode encoding... I think.
+    
+    Arguments:
+        zipped (ZipFile): A zipfile to read from.
+        path (str): The path to the file in the zipfile.
+    
+    Returns:
+        str: The contents of the file.
+    '''
     data_file = zipped.open(path, 'r')
     data_file  = io.TextIOWrapper(data_file, encoding=ENCODING)
     return data_file.read()
 
 def log_ceg(progsnap, student, timestamp, ceg_directory, zipped, parent_event):
+    '''
+    VPL stores CEG directories alongside the submission directories. I believe
+    their name stands for "Compilation-Execution-Grade" which hints at the
+    files stored within. Usually, there are four:
+        compilation.txt: I believe this is any extra information spat out by
+                         the compiler. Haven't tried running any C++/Java/etc
+                         code to see what it does...
+        execution.txt: Results from executing the students' code. Doesn't
+                       indicate if it was a good or bad execution - it depends
+                       on what was set up with the autograder.
+        gradecomments.txt: This is the parsed output of reading the execution
+                           results, looking for "<|-- ... --|>" comments
+                           and grades. Not useful for my purposes.
+        grade.txt: The numeric grade assigned to this compilation by the
+                   autograder.
+    
+    Arguments:
+        progsnap (ProgSnap2): The progsnap instance to log events to.
+        student (str): The unique ID for the student.
+        timestamp (str): A timestamp for when this event occurred.
+        ceg_directory (dict[str:str]) A mapping of the localfilename to their
+                                      absolute paths within the zipfile.
+        zipped (ZipFile): The zip file to get data from.
+        parent_event (Event): The events here are subordinate to a Submission
+                              event; we need to get that event's ID.
+    '''
     if 'execution.txt' not in ceg_directory:
         if 'compilation.txt' in ceg_directory:
             compile_message_data = load_file_contents(zipped, ceg_directory['compilation.txt'])
@@ -396,7 +452,11 @@ def log_ceg(progsnap, student, timestamp, ceg_directory, zipped, parent_event):
 
 def load_vpl_submissions(progsnap, submissions_filename):
     '''
+    Open up a submission file downloaded from VPL and process its events,
+    putting all the events into the progsnap instance.
+    
     Arguments:
+        progsnap (ProgSnap2): The progsnap instance to log events to.
         submissions_filename (str): The file path to the zip file.
     '''
     if not zipfile.is_zipfile(submissions_filename):
@@ -420,16 +480,28 @@ def load_vpl_submissions(progsnap, submissions_filename):
     #pprint(filesystem)
 
 def load_vpl_events(progsnap, events_filename):
+    '''
+    Processes any interesting events from the VPL event file.
+    
+    TODO: I thought there'd be some more interesting stuff in here. But
+          maybe when they use the Edit menu, it will be more interesting?
+          Probably not.
+    '''
     pass
 
-def load_vpl_logs(progsnap, events_filename, submissions_filename):
+def load_vpl_logs(events_filename, submissions_filename, target="exported/"):
     '''
+    Load all the logs from the given files.
+    
     Arguments:
         events_filename (str): The file path to the CSV file
         submissions_filename (str): The file path to the zip file.
+        target (str): The directory to store all the generated files in.
     '''
+    progsnap = ProgSnap2()
     submissions = load_vpl_submissions(progsnap, submissions_filename)
     events = load_vpl_events(progsnap, events_filename)
+    progsnap.export(target)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Convert event logs from VPL into the progsnap2 format.')
@@ -446,7 +518,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     
-    progsnap = ProgSnap2()
-    data = load_vpl_logs(progsnap, args.events, args.submissions)
-    progsnap.export(args.target)
-    print(data)
+    
+    load_vpl_logs(args.events, args.submissions, args.target)
+    
