@@ -11,7 +11,8 @@ VPL_INSTANCE = 'VPL 3.3.1'
 ENCODING = 'utf-8'
 DUMMY_CODE_STATES_DIR = "__CodeStates__"
 
-# Some events trigger at distinct timestamps.
+# Some events trigger at distinct timestamps, so we arbitrarily order
+# certain events over others.
 ARBITRARY_EVENT_ORDER = [
     'Submit',
     'Compile',
@@ -21,24 +22,29 @@ ARBITRARY_EVENT_ORDER = [
     'Feedback.Grade',
 ]
 
+# When writing out columns, we want them in a certain order to make the
+# whole thing more readable
 ARBITRARY_COLUMN_ORDER = ['EventID', 'Order', 'SubjectID',
                           'EventType', 'CodeStateID',
                           'ServerTimestamp', 'ToolInstances']
 
 class Event:
     '''
+    Representation of a given event.
+    
     Attributes:
         event_type (str): Taken from parameter
-        event_id (int): Assigned after all events are sorted.
-        order (int|str): Taken from parameter
+        event_id (int): Assigned from an auto-incrementing counter
+        order (int): Assigned after all the events are created.
         subject_id (str): Taken from parameter
         tool_instances (str): Taken from global constant
-        code_state_id (int): Assigned after all events are sorted.
+        code_state_id (int): The current code state for this event.
+        server_timestamp (str): Taken from parameter
     
     '''
     EVENT_ID = 0
     def __init__(self, server_timestamp, subject_id, event_type, **kwargs):
-        self.server_timestamp = server_timestamp
+        self.server_timestamp = vpl_timestamp_to_iso8601(server_timestamp)
         self.subject_id = subject_id
         self.event_type = event_type
         self._optional_parameters = kwargs
@@ -139,7 +145,7 @@ class ProgSnap2:
         Create the metadata table, which is more or less a constant file.
         '''
         metadata_filename = os.path.join(directory, "DatasetMetadata.csv")
-        with open(metadata_filename, 'w') as metadata_file:
+        with open(metadata_filename, 'w', newline='') as metadata_file:
             metadata_writer = csv.writer(metadata_file, 
                                          **self.csv_writer_options)
             metadata_writer.writerow(['Property', 'Value'])
@@ -255,6 +261,16 @@ class ProgSnap2:
             self.code_files[code] = self.CODE_ID
             self.CODE_ID += 1
         return code_state_id
+        
+def vpl_timestamp_to_iso8601(timestamp):
+    '''
+    2018-10-31-12-02-25
+    ->
+    2018-10-31T12:02:25
+    '''
+    date = timestamp[:10]
+    time = timestamp[-8:].replace("-", ":")
+    return date + "T" + time
 
 def add_path(structure, path):
     components = path.split("/")
