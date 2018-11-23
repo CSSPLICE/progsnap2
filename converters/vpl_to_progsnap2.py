@@ -330,7 +330,7 @@ if __name__ == "__main__":
     parser.add_argument('submissions', type=str,
                         help='The submissions zip file source filename for the assignment.')
     parser.add_argument('--target', dest='target',
-                        default=None,
+                        default="exported/",
                         help='The filename or directory to save this in.')
     parser.add_argument('--unzipped', dest='unzipped',
                         default=False, action='store_true',
@@ -340,5 +340,5 @@ if __name__ == "__main__":
     
     progsnap = ProgSnap2()
     data = load_vpl_logs(progsnap, args.events, args.submissions)
-    progsnap.export('exported/')
+    progsnap.export(args.target)
     print(data)
