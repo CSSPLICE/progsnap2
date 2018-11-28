@@ -181,7 +181,7 @@ class ProgSnap2:
         self.main_table_header = ARBITRARY_COLUMN_ORDER
         self.main_table = []
         
-        self.code_files = {tuple(): 0}
+        self.code_files = {} #{tuple(): 0}
         self.CODE_ID = 1
     
     def export(self, directory):

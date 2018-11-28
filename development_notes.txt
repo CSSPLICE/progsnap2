@@ -1,0 +1,11 @@
+Notes during development:
+General strategy: grab together ALL the events into one table, and then sort them based on their timestamps/subject/type. Then I could assign event IDs retrospectively.
+Had to deduplicate code states, so I hashed the directory’s contents into a dictionary mapped to incrementally assigned integers. Potential issue: this is probably not deterministic - should I be using a different hashing algorithm to ensure that this is consistent across any run of my algorithm? Some worry about uniqueness, perhaps unfounded?
+Code state IDs are assigned to events without them during the retrospective event ID assignment. One nuance: what happens with an event for someone who has no prior code state? I ended up making a sentinel “null” code state (ID is 0) that would represent an empty repository.
+Did column order matter? According to the spec, no. It made the code a little simpler in one place
+Can I use an Epoch time for my Order column? It would make some of the processing easier, and it would prevent it from being redundant from the EventID column. After discussion on the listserv, no I cannot.
+VPL’s submission logs are separate from the event logs - have to reconcile them
+Given that Python is not really “compiled”, how do the event submissions fit into standard? Did I “Compile” the code, or just “Run.Program” it? Or perhaps its a “Run.Test” since we’re evaluating the students’ code - but not just unit testing, we’re doing a number of different kinds of checks. What about if there’s an error?
+VPL generates output that is parsed to determine what to display to the student. Is this an Intervention or just the ProgramResult?
+The EventID is generated when I create an event, and the Order is generated after I sort the events. This means that these two values are out of sync. Three options: do nothing about this, reorder the EventID (tricky, and some other columns refer back to it that would also need to be kept in sync), or use something other than numerical identifiers for EventID (perhaps a useful mnemonic?).
+Suitably IRB-covered data is hard to come by. I decided to mock up some data that demonstrates some of the features.
