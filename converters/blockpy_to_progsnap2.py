@@ -1,5 +1,5 @@
 '''
-A command line tool for turning VPL logs into ProgSnap2 format
+A command line tool for turning blockpy logs into ProgSnap2 format
 
 Refer to:
     Protocol Draft: https://docs.google.com/document/d/1bZPu8LIUPOfobWsCO_9ayi5LC9_1wa1YCAYgbKGAZfA/edit#
@@ -11,17 +11,29 @@ TODO:
 '''
 
 import zipfile
+import tarfile
+import json
 import argparse
 import os
 import sys
 import csv
 import io
 import shutil
+from datetime import datetime
+from collections import Counter
 from pprint import pprint
 
-VPL_INSTANCE = 'VPL 3.3.1'
-ENCODING = 'latin-1'
+#try:
+#    from tqdm import tqdm
+#except:
+#    print("TQDM is not installed")
+#    tqdm = list
+from tqdm import tqdm
+
+BLOCKPY_INSTANCE = 'BlockPy4'
+ENCODING = 'utf8'
 DUMMY_CODE_STATES_DIR = "__CodeStates__"
+TEMPORARY_DIRECTORY = "__temp__"
 
 # Some events trigger at distinct timestamps, so we arbitrarily order
 # certain events over others.
@@ -39,6 +51,9 @@ ARBITRARY_EVENT_ORDER = [
 ARBITRARY_COLUMN_ORDER = ['EventID', 'Order', 'SubjectID',
                           'EventType', 'CodeStateID',
                           'ServerTimestamp', 'ToolInstances']
+                          
+class UnclassifiedEventType(Exception):
+    pass
 
 class Event:
     '''
@@ -99,7 +114,7 @@ class Event:
         ordered_values = [value for parameter, value in sorted_parameters]
         return [self.event_id, self.order, self.subject_id, 
                 self.event_type, self.code_state_id,
-                self.server_timestamp, VPL_INSTANCE] + ordered_values
+                self.server_timestamp, BLOCKPY_INSTANCE] + ordered_values
     
     @staticmethod
     def distill_parameters(events):
@@ -220,7 +235,7 @@ class ProgSnap2:
             directory (str): The location to store the generated files.
         '''
         main_table_filename = os.path.join(directory, "MainTable.csv")
-        with open(main_table_filename, 'w', newline='') as main_table_file:
+        with open(main_table_filename, 'w', newline='', encoding=ENCODING) as main_table_file:
             main_table_writer = csv.writer(main_table_file, 
                                            **self.csv_writer_options)
             self.finalize_table()
@@ -248,14 +263,19 @@ class ProgSnap2:
             os.rename(code_states_dir, dummy_dir)
             shutil.rmtree(dummy_dir)
         os.mkdir(code_states_dir)
-        for files, code_state_id in self.code_files.items():
+        for files, code_state_id in tqdm(self.code_files.items()):
             code_state_dir = os.path.join(code_states_dir, str(code_state_id))
             if not os.path.exists(code_state_dir):
                 os.mkdir(code_state_dir)
-            for filename, contents in files:
-                code_state_filename = os.path.join(code_state_dir, filename)
+            if isinstance(files, str):
+                code_state_filename = os.path.join(code_state_dir, '__main__.py')
                 with open(code_state_filename, 'w', encoding=ENCODING) as code_state_file:
-                    code_state_file.write(contents)
+                    code_state_file.write(files)
+            else:
+                for filename, contents in files:
+                    code_state_filename = os.path.join(code_state_dir, filename)
+                    with open(code_state_filename, 'w', encoding=ENCODING) as code_state_file:
+                        code_state_file.write(contents)
     
     def finalize_table(self):
         '''
@@ -297,7 +317,7 @@ class ProgSnap2:
         self.main_table.append(new_event)
         return new_event
     
-    def log_submit(self, when, subject_id, submission_directory, zipped):
+    def log_code_state(self, when, subject_id, submission):
         '''
         Add in a Submit event, which has associated code in the zip file.
         
@@ -305,22 +325,24 @@ class ProgSnap2:
             when (str): the timestamp to use when ordering these events.
                         Currently using the ServerTimestamp.
             subject_id (str): Uniquely identifying user id.
-            submission_directory (dict[str:str]): A dictionary that maps
-                                                  local filenames to their
-                                                  absolute path in the zip
-                                                  file.
+            submission (str or dict[str:str]): A dictionary that maps
+                                               local filenames to their
+                                               absolute path in the zip
+                                               file. Alternatively, the raw
+                                               string of the code.
             zipped (ZipFile): A zipfile that has the students' code in it.
         Returns:
             Event: The newly created event
         '''
-        new_event = self.log_event(when, subject_id, 'Submit')
-        code = []
-        for filepath, full in submission_directory.items():
-            contents = load_file_contents(zipped, full)
-            code.append((filepath, contents))
-        code = tuple(sorted(code))
-        new_event.code_state_id = self.hash_code_directory(code)
-        return new_event
+        if isinstance(submission, str):
+            code = submission
+        else:
+            code = []
+            for filepath, full in submission.items():
+                contents = load_file_contents(zipped, full)
+                code.append((filepath, contents))
+            code = tuple(sorted(code))
+        return self.hash_code_directory(code)
     
     def hash_code_directory(self, code):
         '''
@@ -344,21 +366,22 @@ class ProgSnap2:
             self.CODE_ID += 1
         return code_state_id
         
-def vpl_timestamp_to_iso8601(timestamp):
+def blockpy_timestamp_to_iso8601(timestamp):
     '''
-    Converts VPL style timestamps into an ISO-8601 compatible timestamp.
+    Converts blockpy style timestamps into an ISO-8601 compatible timestamp.
     
-    > vpl_timestamp_to_iso8601(2018-10-31-12-02-25)
+    > blockpy_timestamp_to_iso8601(2018-10-31-12-02-25)
     2018-10-31T12:02:25
     
     Arguments:
-        timestamp (str): A VPL-style timestamp
+        timestamp (str): A blockpy-style timestamp
     Returns:
         str: The ISO-8601 timestamp.
     '''
-    date = timestamp[:10]
-    time = timestamp[-8:].replace("-", ":")
-    return date + "T" + time
+    return datetime.fromtimestamp(int(timestamp)).isoformat()
+    #date = timestamp[:10]
+    #time = timestamp[-8:].replace("-", ":")
+    #return date + "T" + time
 
 def add_path(structure, path, limit_depth=1):
     '''
@@ -407,7 +430,7 @@ def load_file_contents(zipped, path):
 
 def log_ceg(progsnap, student, timestamp, ceg_directory, zipped, parent_event):
     '''
-    VPL stores CEG directories alongside the submission directories. I believe
+    blockpy stores CEG directories alongside the submission directories. I believe
     their name stands for "Compilation-Execution-Grade" which hints at the
     files stored within. Usually, there are four:
         compilation.txt: I believe this is any extra information spat out by
@@ -453,66 +476,211 @@ def log_ceg(progsnap, student, timestamp, ceg_directory, zipped, parent_event):
                            InterventionType='Grade',
                            InterventionMessage=grade,
                            ParentEventID=parent_event.event_id)
+                           
+                           
+def load_tarfile(input_filename, extraction_directory):
+    needed_files = ['log.json']
+    for need in needed_files:
+        target = extraction_directory+"/"+need
+        # TODO: Doesn't work - why?
+        if os.path.exists(target.strip()):
+            yield need, target
+            continue
+        # Otherwise, we need to extract it
+        compressed = tarfile.open(input_filename)
+        for potential_path in ['db/'+need, need]:
+            names = [tar_info.name for tar_info in compressed.getmembers()]
+            if potential_path in names:
+                member = compressed.getmember(potential_path)
+                member.name = os.path.basename(member.name)
+                compressed.extract(need, extraction_directory, set_attrs=False)
+                yield need, target
+                break
+        else:
+            raise Exception("Could not find log.json in given file: "+input_filename)
+    
+def make_directory(directory):
+    # Remove any existing CodeStates in this directory
+    if os.path.exists(directory):
+        # Avoid bug on windows where a handle is sometimes kept
+        dummy_dir = directory+"_old"
+        os.rename(directory, dummy_dir)
+        shutil.rmtree(dummy_dir)
+    os.mkdir(directory)
+    return directory
+    
+def chomp_iso_time_decimal(a_time):
+    if '.' in a_time:
+        return a_time[:a_time.find('.')]
+    else:
+        return a_time
 
-def load_vpl_submissions(progsnap, submissions_filename):
+def map_blockpy_event_to_progsnap(event, action, body):
+    if event == 'code' and action == 'set':
+        return {'event_type': "File.Edit", 'EditType': "GenericEdit"}
+    # NOTE: We treat the feedback delivered to the student as the actual run
+    #elif event == 'engine' and action == 'on_run':
+    #    return 'Run.Program'
+    elif event == 'editor':
+        if action == 'load':
+            return 'Session.Start'
+        elif action == 'reset':
+            return {'event_type': "File.Edit", 'EditType': "Reset"}
+        elif action == 'blocks':
+            return 'X-View.Blocks'
+        elif action == 'text':
+            return 'X-View.Text'
+        elif action == 'split':
+            return 'X-View.Split'
+        elif action == 'instructor':
+            return 'X-View.Settings'
+        elif action == 'history':
+            return 'X-View.History'
+        elif action == 'trace':
+            return 'X-View.Trace'
+        elif action == 'upload':
+            return 'X-File.Upload'
+        elif action == 'download':
+            return 'X-File.Download'
+        elif action == 'changeIP':
+            return 'X-Session.Move'
+        elif action == 'run':
+            # NOTE: Don't care about redundant news that "run" button was clicked
+            return None
+    elif event == 'trace_step':
+        return 'X-View.Step'
+    elif event == 'feedback':
+        if action.lower().startswith('analyzer|'):
+            return {'event_type': "Intervention",
+                    'InterventionType': "Analyzer",
+                    'InterventionMessage': action+"|"+body}
+        
+        elif action.lower() == 'editor error' or action.lower().startswith('syntax|'):
+            return {'event_type': "Compile.Error",
+                    'CompileMessageType': action+"|"+body}
+        
+        elif action.lower().startswith('complete|'):
+            return {'event_type': "Run.Program",
+                    'ExecutionResult': "Success"}
+        elif action.lower().startswith('runtime|') or action.lower() == 'runtime':
+            return {'event_type': "Run.Program",
+                    'ExecutionResult': "Error",
+                    'ProgramErrorOutput': action+"|"+body}
+        elif action.lower() == 'internal error':
+            return {'event_type': "Run.Program",
+                    'ExecutionResult': "SystemError",
+                    'ProgramErrorOutput': action+"|"+body}
+        
+        return {'event_type': "Intervention", 'InterventionType': "Feedback",
+                'InterventionMessage': action+"|"+body}
+    elif event == 'engine':
+        # NOTE: Don't care about the engine trigger events?
+        # TODO: Luke probably cares about this, we may have to jury rig a way
+        #       to attach it to the proper feedback result.
+        return None
+    elif event == 'instructor':
+        # NOTE: Don't care about instructors editing assignments
+        return None
+    elif event == 'trace':
+        # NOTE: Don't care about redundant activation of tracer
+        return None
+    raise UnclassifiedEventType((event, action, body))
+
+def log_blockpy_event(progsnap, record):
+    # Skip events without timestamps
+    if not record['timestamp']:
+        return (record['event'], record['action'])
+    # Gather local variables
+    event = record['event']
+    action = record['action']
+    body = record['body']
+    when = blockpy_timestamp_to_iso8601(record['timestamp'])
+    server_timestamp = chomp_iso_time_decimal(record['date_created'])
+    subject_id = record['user_id']
+    assignment_id = record['assignment_id']
+    # Process event types
+    progsnap_event = map_blockpy_event_to_progsnap(event, action, body)
+    # Wrap strings with dictionaries
+    if progsnap_event == None:
+        return (record['event'], record['action'])
+    if isinstance(progsnap_event, str):
+        progsnap_event = {'event_type': progsnap_event}
+    # File edits get code states
+    code_state_id = None
+    if progsnap_event['event_type'] == "File.Edit":
+        code_state_id = progsnap.log_code_state(when, subject_id, body)
+    # And actually log the event
+    progsnap.log_event(when, subject_id,
+                       AssignmentID='assignment_id',
+                       CodeStateID=code_state_id,
+                       ServerTimestamp=server_timestamp,
+                       **progsnap_event)
+                       
+    # And done
+    return (event, action)
+
+def load_blockpy_events(progsnap, input_filename, target):
     '''
-    Open up a submission file downloaded from VPL and process its events,
+    Open up a submission file downloaded from blockpy and process its events,
     putting all the events into the progsnap instance.
     
     Arguments:
         progsnap (ProgSnap2): The progsnap instance to log events to.
         submissions_filename (str): The file path to the zip file.
     '''
-    if not zipfile.is_zipfile(submissions_filename):
-        raise Exception("I expected a Zipfile for "+str(submissions_filename))
-    zipped = zipfile.ZipFile(submissions_filename)
     filesystem = {}
-    for name in zipped.namelist():
-        add_path(filesystem, name)
+    
+    # Open data file appropriately
+    if zipfile.is_zipfile(input_filename):
+        compressed = zipfile.ZipFile(input_filename)
+        logs = compressed.open('db/log.json')
+    elif tarfile.is_tarfile(input_filename):
+        temporary_directory = make_directory(TEMPORARY_DIRECTORY)
+        data_files = load_tarfile(input_filename, temporary_directory)
+    for name, path in data_files:
+        with open(path) as data_file:
+            filesystem[name] = json.load(data_file)
+    pprint(filesystem['log.json'][:10])
+    types = Counter()
+    for event in filesystem['log.json']:
+        event_type = log_blockpy_event(progsnap, event)
+        types[event_type] += 1
+    pprint(dict(types.items()))
+        
+    #for name in zipped.namelist():
+        #add_path(filesystem, name)
+    return None
+    
     for student, student_directory in filesystem.items():
         sorted_student_directory = sorted(student_directory.items())
         for timestamp, submission_directory in sorted_student_directory:
             if timestamp.endswith('.ceg'):
                 continue
-            submission = progsnap.log_submit(vpl_timestamp_to_iso8601(timestamp), 
+            submission = progsnap.log_submit(blockpy_timestamp_to_iso8601(timestamp), 
                                              student, submission_directory, zipped)
             ceg_path = timestamp+'.ceg'
             if ceg_path in student_directory:
                 ceg_directory = student_directory[ceg_path]
-                log_ceg(progsnap, student, vpl_timestamp_to_iso8601(timestamp),
+                log_ceg(progsnap, student, blockpy_timestamp_to_iso8601(timestamp),
                         ceg_directory, zipped, submission)
     #pprint(filesystem)
 
-def load_vpl_events(progsnap, events_filename):
-    '''
-    Processes any interesting events from the VPL event file.
-    
-    TODO: I thought there'd be some more interesting stuff in here. But
-          maybe when they use the Edit menu, it will be more interesting?
-          Probably not.
-    '''
-    pass
-
-def load_vpl_logs(events_filename, submissions_filename, target="exported/"):
+def load_blockpy_logs(input_filename, target="exported/"):
     '''
     Load all the logs from the given files.
     
     Arguments:
-        events_filename (str): The file path to the CSV file
-        submissions_filename (str): The file path to the zip file.
+        input_filename (str): The file path to the zipped file
         target (str): The directory to store all the generated files in.
     '''
     progsnap = ProgSnap2()
-    submissions = load_vpl_submissions(progsnap, submissions_filename)
-    events = load_vpl_events(progsnap, events_filename)
+    load_blockpy_events(progsnap, input_filename, target)
     progsnap.export(target)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Convert event logs from VPL into the progsnap2 format.')
-    parser.add_argument('events', type=str,
-                        help='The events CSV source filename for the course.')
-    parser.add_argument('submissions', type=str,
-                        help='The submissions zip file source filename for the assignment.')
+    parser = argparse.ArgumentParser(description='Convert event logs from BlockPy into the progsnap2 format.')
+    parser.add_argument('input', type=str,
+                        help='The dumped database zip.')
     parser.add_argument('--target', dest='target',
                         default="exported/",
                         help='The filename or directory to save this in.')
@@ -523,5 +691,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     
-    load_vpl_logs(args.events, args.submissions, args.target)
+    load_blockpy_logs(args.input, args.target)
     
