@@ -527,6 +527,7 @@ def make_directory(directory):
     return directory
     
 def chomp_iso_time_decimal(a_time):
+    a_time = "T".join(a_time.split())
     if '.' in a_time:
         return a_time[:a_time.find('.')]
     else:
@@ -559,7 +560,7 @@ def map_blockpy_event_to_progsnap(event, action, body):
             return 'X-File.Upload'
         elif action == 'download':
             return 'X-File.Download'
-        elif action == 'changeIP':
+        elif action in ('changeIP', 'change'):
             return 'X-Session.Move'
         elif action == 'import':
             return 'X-Dataset.Import'
@@ -660,6 +661,8 @@ def load_blockpy_events(progsnap, input_filename, target):
         data_files = load_zipfile(input_filename, temporary_directory)
     elif tarfile.is_tarfile(input_filename):
         data_files = load_tarfile(input_filename, temporary_directory)
+    else:
+        data_files = [('log.json', input_filename)]
     for name, path in data_files:
         with open(path) as data_file:
             filesystem[name] = json.load(data_file)
