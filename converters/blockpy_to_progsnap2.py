@@ -19,6 +19,8 @@ import sys
 import csv
 import io
 import shutil
+import random
+import re
 from datetime import datetime
 from collections import Counter
 from pprint import pprint
@@ -38,21 +40,25 @@ TEMPORARY_DIRECTORY = "__temp__"
 # Some events trigger at distinct timestamps, so we arbitrarily order
 # certain events over others.
 ARBITRARY_EVENT_ORDER = [
+    'Session.Start',
+    'X-File.Upload',
+    'File.Edit',
     'Submit',
     'Compile',
+    'Run.Program',
     'Compile.Error',
-    'Program.Run',
-    'Program.Test',
     'Feedback.Grade',
+    'Intervention'
 ]
 # When writing out columns, we want them in a certain order to make the
 # whole thing more readable
-ARBITRARY_COLUMN_ORDER = ['EventID', 'Order', 'SubjectID', 'AssignmentID',
+ARBITRARY_COLUMN_ORDER = ['EventID', 'Order', 'SubjectID', 'AssignmentID', 'CourseID',
                           'EventType', 'CodeStateID',
+                          'ParentEventID',
                           'ClientTimestamp',
                           'Score',
                           'EditType',
-                          'CompileMessageType',
+                          'CompileMessageType', 'CompileMessageData', 'SourceLocation',
                           'ExecutionResult',
                           'ProgramErrorOutput',
                           'InterventionType',
@@ -163,7 +169,10 @@ class Event:
         Returns:
             str: The timestamp
         '''
-        return self.ClientTimestamp
+        try:
+            return (self.ClientTimestamp, ARBITRARY_EVENT_ORDER.index(self.EventType))
+        except ValueError:
+            return (self.ClientTimestamp, len(ARBITRARY_EVENT_ORDER))
     
     @staticmethod
     def get_parameter_order(parameter):
@@ -229,8 +238,11 @@ class ProgSnap2:
         Arguments:
             directory (str): The location to store the generated files.
         '''
+        self.report("Exporting Metadata")
         self.export_metadata(directory)
+        self.report("Exporting Main Table")
         self.export_main_table(directory)
+        self.report("Exporting CodeState files")
         self.export_code_states(directory)
     
     def export_metadata(self, directory):
@@ -311,6 +323,9 @@ class ProgSnap2:
                     code_state_filename = os.path.join(code_state_dir, filename)
                     with _make_file(code_state_filename) as code_state_file:
                         code_state_file.write(contents)
+                        
+    def report(self, *messages):
+        print(*messages)
     
     def finalize_table(self):
         '''
@@ -318,7 +333,36 @@ class ProgSnap2:
         Add in order (and CodeStateID if it's missing)
         '''
         self.main_table.sort(key= Event.get_order)
+        
+        BAD_EVENTS = set()
+        
+        self.report("Fixing any Upload events to happen BEFORE the next File.Edit")
+        remapped_uploads = {}
+        FOUND_UPLOADS = 0
+        REMAPPED_UPLOADS = 0
+        for event in self.main_table:
+            identifier = (event.SubjectID, event.AssignmentID)
+            if event.EventType == 'X-File.Upload':
+                remapped_uploads[identifier] = event
+                FOUND_UPLOADS += 1
+            elif event.EventType == 'File.Edit':
+                if identifier in remapped_uploads:
+                    remapped_uploads[identifier].CodeStateID = event.CodeStateID
+                    REMAPPED_UPLOADS += 1
+                    del remapped_uploads[identifier]
+        self.report("Found", FOUND_UPLOADS, "uploads, remapped", REMAPPED_UPLOADS)
+        if remapped_uploads:
+            aids = Counter()
+            sids = Counter()
+            for (SID, AID), event in remapped_uploads.items():
+                self.report("\tUnmatched Upload:", SID, AID, event.ClientTimestamp)
+                aids[AID] += 1
+                sids[SID] += 1
+            print(aids.items())
+            print(sids.items())
+        
         # Go fetch first code_states for everything
+        self.report("Finding initial code states")
         first_code_states = {}
         for event in self.main_table:
             identifier = (event.SubjectID, event.AssignmentID)
@@ -327,7 +371,25 @@ class ProgSnap2:
             current_code_state = first_code_states.get(identifier, 0)
             if event.CodeStateID is not None:
                 first_code_states[identifier] = event.CodeStateID
+        
+        # Attach Compile.Error events to latest relevant compile
+        self.report("Attaching parent Compile events to Compile.Error events")
+        reattached, unattached = 0, 0
+        previous_compile = {}
+        for event in self.main_table:
+            identifier = (event.SubjectID, event.AssignmentID)
+            if event.EventType == 'Compile':
+                previous_compile[identifier] = event.EventID
+            elif event.EventType == 'Compile.Error':
+                if identifier not in previous_compile:
+                    unattached += 1
+                else:
+                    reattached += 1
+                event.ParentEventID = previous_compile.get(identifier, -1)
+        print("Reattached:", reattached, ", Failed on", unattached, ", Unfinished:", len(previous_compile))
+        
         # Fix order attribute, make sure CodeStateID is correct
+        self.report("Fixing order/CodeStateID based on last File.Edit events")
         order = 0
         CodeStateID = 0
         code_states = {}
@@ -350,6 +412,13 @@ class ProgSnap2:
             order += 1
             code_states[identifier] = current_code_state
             score_state[identifier] = current_score_state
+        
+        # Filter out bad events
+        self.report("Filtering out", len(BAD_EVENTS), "bad events")
+        if BAD_EVENTS:
+            for i, event in enumerate(self.main_table):
+                if event.EventID in BAD_EVENTS:
+                    del self.main_table[i]
     
     def log_event(self, **kwargs):
         '''
@@ -532,13 +601,15 @@ def chomp_iso_time_decimal(a_time):
         return a_time[:a_time.find('.')]
     else:
         return a_time
+        
+line_finder = re.compile(r"line (\d+)")
 
 def map_blockpy_event_to_progsnap(event, action, body):
     if event == 'code' and action == 'set':
         return {'EventType': "File.Edit", 'EditType': "GenericEdit"}
     # NOTE: We treat the feedback delivered to the student as the actual run
-    #elif event == 'engine' and action == 'on_run':
-    #    return 'Run.Program'
+    elif event == 'engine' and action == 'on_run':
+        return 'Compile'
     elif event == 'editor':
         if action == 'load':
             return 'Session.Start'
@@ -576,8 +647,10 @@ def map_blockpy_event_to_progsnap(event, action, body):
                     'InterventionMessage': action+"|"+body}
         
         elif action.lower() == 'editor error' or action.lower().startswith('syntax|'):
+            lines = line_finder.findall(body)
             return {'EventType': "Compile.Error",
-                    'CompileMessageType': action+"|"+body}
+                    'CompileMessageType': action, 'CompileMessageData': body,
+                    'SourceLocation': lines[0] if lines else ""}
         
         elif action.lower().startswith('complete|'):
             return {'EventType': "Run.Program",
@@ -612,21 +685,24 @@ def map_blockpy_event_to_progsnap(event, action, body):
 
 def log_blockpy_event(progsnap, record):
     # Skip events without timestamps
-    if not record['timestamp'] or record['timestamp'] == 'None':
-        return (record['event'], record['action'])
+        #return (record['event'], record['action'])
     # Gather local variables
-    event = record['event']
-    action = record['action']
+    event = record['category'] if 'category' in record else record['event']
+    action = record['label'] if 'label' in record else record['action']
+    if not record['timestamp'] or record['timestamp'] == 'None':
+        return (event, action)
     body = record['body']
     ClientTimestamp = blockpy_timestamp_to_iso8601(record['timestamp'])
     ServerTimestamp = chomp_iso_time_decimal(record['date_created'])
     SubjectID = record['user_id']
     AssignmentID = record['assignment_id']
+    CourseID = record.get('course_id', 0)
     # Process event types
     progsnap_event = map_blockpy_event_to_progsnap(event, action, body)
     # Wrap strings with dictionaries
     if progsnap_event == None:
-        return (record['event'], record['action'])
+        return (event, action)
+        #return (record['event'], record['action'])
     if isinstance(progsnap_event, str):
         progsnap_event = {'EventType': progsnap_event}
     # File edits get code states
@@ -639,6 +715,8 @@ def log_blockpy_event(progsnap, record):
                        AssignmentID=AssignmentID,
                        CodeStateID=CodeStateID,
                        ServerTimestamp=ServerTimestamp,
+                       CourseID=CourseID,
+                       ParentEventID="",
                        **progsnap_event)
                        
     # And done
@@ -658,20 +736,23 @@ def load_blockpy_events(progsnap, input_filename, target):
     # Open data file appropriately
     temporary_directory = make_directory(TEMPORARY_DIRECTORY)
     if zipfile.is_zipfile(input_filename):
+        progsnap.report("Opening ZIP data file")
         data_files = load_zipfile(input_filename, temporary_directory)
     elif tarfile.is_tarfile(input_filename):
+        progsnap.report("Opening TAR data file")
         data_files = load_tarfile(input_filename, temporary_directory)
     else:
+        progsnap.report("Opening JSON data file")
         data_files = [('log.json', input_filename)]
     for name, path in data_files:
         with open(path) as data_file:
             filesystem[name] = json.load(data_file)
-    pprint(filesystem['log.json'][:10])
+    #pprint(filesystem['log.json'][:10])
     types = Counter()
     for event in filesystem['log.json']:
         EventType = log_blockpy_event(progsnap, event)
         types[EventType] += 1
-    pprint(dict(types.items()))
+    #pprint(dict(types.items()))
     
 
 def load_blockpy_logs(input_filename, target="exported/"):
